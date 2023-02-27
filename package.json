@@ -1,0 +1,34 @@
+{
+  "name": "ngs-stats-of-the-storm-creator",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GaryIrick/ngs-stats-of-the-storm-creator.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/GaryIrick/ngs-stats-of-the-storm-creator/issues"
+  },
+  "homepage": "https://github.com/GaryIrick/ngs-stats-of-the-storm-creator#readme",
+  "dependencies": {
+    "delay": "^5.0.0",
+    "hots-parser": "^7.55.2",
+    "linvodb3": "^3.25.1",
+    "medea": "^1.0.3",
+    "medeadown": "^1.1.9",
+    "superagent": "^8.0.9"
+  },
+  "devDependencies": {
+    "eslint": "^8.18.0",
+    "eslint-config-standard": "^17.0.0",
+    "eslint-plugin-import": "^2.26.0",
+    "eslint-plugin-n": "^15.2.3",
+    "eslint-plugin-promise": "^6.0.0"
+  }
+}
