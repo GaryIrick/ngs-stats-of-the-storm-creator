@@ -64,6 +64,42 @@ const createCollections = async (db, teams) => {
   return collectionMap
 }
 
+const createTeams = async (db, teams) => {
+  const requiredTeams = teams.map(t => t.teamName)
+
+  const existingTeams = await new Promise((resolve, reject) => {
+    db.settings.find({ type: 'team' }, (err, foundTeams) => {
+      if (err) {
+        reject(err)
+      }
+      resolve(foundTeams)
+    })
+  })
+
+  const teamMap = {}
+
+  for (const existingTeam of existingTeams) {
+    teamMap[existingTeam.name] = existingTeam._id
+  }
+
+  for (const teamName of requiredTeams) {
+    if (!existingTeams.find((t) => t.name === teamName)) {
+      await new Promise((resolve, reject) => {
+        db.settings.insert({ type: 'team', name: teamName, players: [] }, (err, createdTeam) => {
+          if (err) {
+            reject(err)
+          }
+
+          teamMap[createdTeam.name] = createdTeam._id
+          resolve(createdTeam)
+        })
+      })
+    }
+  }
+
+  return teamMap
+}
+
 const insertReplay = async (db, match, players, collections) => {
   if (!collections) {
     match.collection = []
@@ -145,6 +181,7 @@ const run = async () => {
   const { returnObject: teams } = await getFromNgs('team/get/registered')
 
   const collectionMap = await createCollections(db, teams)
+  const teamMap = await createTeams(db, teams)
 
   const files = fs.readdirSync(replayCachePath)
 
