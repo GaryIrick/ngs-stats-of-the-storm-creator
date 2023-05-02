@@ -408,9 +408,15 @@ const run = async () => {
         }
 
         console.log(`Importing ${filename}.`)
-
         const localFile = `${replayDirectory}/${filename}`
-        await downloadReplay(s3, replayBucket, filename, localFile)
+
+        try {
+          await downloadReplay(s3, replayBucket, filename, localFile)
+        } catch (e) {
+          console.log(`Unable to download ${filename} from S3, skipping.`)
+          continue
+        }
+
         const { match: replay, players, status } = parser.processReplay(localFile, { overrideVerifiedBuild: true })
         fs.unlinkSync(localFile)
         const bluePlayers = []
