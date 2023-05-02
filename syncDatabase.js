@@ -403,7 +403,6 @@ const run = async () => {
         }
 
         if (await alreadyProcessedReplay(db, filename)) {
-          console.log(`Skipping ${filename}.`)
           continue
         }
 
