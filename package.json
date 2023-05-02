@@ -17,12 +17,15 @@
   },
   "homepage": "https://github.com/GaryIrick/ngs-stats-of-the-storm-creator#readme",
   "dependencies": {
+    "adm-zip": "^0.5.10",
+    "aws-sdk": "^2.1369.0",
     "delay": "^5.0.0",
     "hots-parser": "^7.55.2",
     "linvodb3": "^3.25.1",
     "medea": "^1.0.3",
     "medeadown": "^1.1.9",
-    "superagent": "^8.0.9"
+    "superagent": "^8.0.9",
+    "tmp-promise": "^3.0.3"
   },
   "devDependencies": {
     "eslint": "^8.18.0",

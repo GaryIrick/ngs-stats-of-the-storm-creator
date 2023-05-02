@@ -1,11 +1,20 @@
+// Squelch warnings from the parser.
+process.env.LOGLEVEL = 'error'
+
 const fs = require('fs')
-const agent = require('superagent')
+const path = require('path')
+const AdmZip = require('adm-zip')
+const AWS = require('aws-sdk')
+const tmp = require('tmp-promise')
 const parser = require('hots-parser')
 const LinvoDB = require('linvodb3')
 const postFromNgs = require('./postFromNgs')
 const getFromNgs = require('./getFromNgs')
 const { uniq, startCase } = require('lodash')
-const { replayCachePath, dbPath, currentSeason, ngsBucket } = require('./config')
+const { currentSeason, replayBucket, statsBucket, statsFolder } = require('./config')
+
+// Make the AWS SDK stop whining about V2 going into maintenance mode soon.
+require('aws-sdk/lib/maintenance_mode_message').suppress = true
 
 LinvoDB.defaults.store = { db: require('medeadown') }
 
@@ -13,6 +22,7 @@ const openDatabase = (path) => {
   const db = {}
 
   db.matches = new LinvoDB('matches', {}, { filename: path + '/matches.ldb' })
+  db.parsedReplays = new LinvoDB('parsedReplays', {}, { filename: path + '/parsedReplays.ldb' })
   db.heroData = new LinvoDB('heroData', {}, { filename: path + '/hero.ldb' })
   db.players = new LinvoDB('players', {}, { filename: path + '/players.ldb' })
   db.settings = new LinvoDB('settings', {}, { filename: path + '/settings.ldb' })
@@ -21,6 +31,14 @@ const openDatabase = (path) => {
   db.players.ensureIndex({ fieldName: 'hero' })
 
   return db
+}
+
+const closeDatabase = async (db) => {
+  await db.matches.store.close()
+  await db.parsedReplays.store.close()
+  await db.heroData.store.close()
+  await db.players.store.close()
+  await db.settings.store.close()
 }
 
 const createCollections = async (db, teams) => {
@@ -133,7 +151,7 @@ const findMatchingTeam = (homeTeam, awayTeam, players) => {
   }
 }
 
-const insertReplay = async (db, match, players, collections) => {
+const insertReplay = async (db, match, filename, players, collections) => {
   if (!collections) {
     match.collection = []
   } else {
@@ -152,6 +170,16 @@ const insertReplay = async (db, match, players, collections) => {
           resolve(newDoc)
         }
       })
+  })
+
+  await new Promise((resolve, reject) => {
+    db.parsedReplays.insert({ _id: filename }, (err, inserted) => {
+      if (err) {
+        reject(err)
+      } else {
+        resolve()
+      }
+    })
   })
 
   if (createdMatch) {
@@ -175,6 +203,20 @@ const insertReplay = async (db, match, players, collections) => {
   }
 
   return createdMatch ? createdMatch._id : undefined
+}
+
+const alreadyProcessedReplay = async (db, filename) => {
+  const wasFound = await new Promise((resolve, reject) => {
+    db.parsedReplays.findOne({ _id: filename }, (err, found) => {
+      if (err) {
+        reject(err)
+      } else {
+        resolve(!!found)
+      }
+    })
+  })
+
+  return wasFound
 }
 
 const updatePlayers = async (db, players) => {
@@ -208,12 +250,20 @@ const updatePlayers = async (db, players) => {
   }
 }
 
-const downloadFile = async (url, path) => {
-  await new Promise((resolve, reject) => {
-    const stream = fs.createWriteStream(path)
-    agent.get(url).pipe(stream)
-    stream.on('finish', resolve)
-  })
+const downloadReplay = async (s3, bucket, key, fullPath) => {
+  const writeStream = fs.createWriteStream(fullPath)
+  try {
+    const readStream = s3.getObject({ Bucket: bucket, Key: key }).createReadStream()
+    await new Promise((resolve, reject) => {
+      readStream.on('error', (err) => reject(err))
+      writeStream.on('error', (err) => reject(err))
+      writeStream.on('finish', () => resolve())
+
+      readStream.pipe(writeStream)
+    })
+  } finally {
+    writeStream.close()
+  }
 }
 
 const getCollectionIdsForDivision = (collectionMap, divisionConcat) => {
@@ -232,11 +282,102 @@ const getCollectionIdsForDivision = (collectionMap, divisionConcat) => {
   return collectionIds
 }
 
+const downloadAndExtractZipFromS3 = async (s3, zipFilename, fullZipPath, dbPath) => {
+  const writeStream = fs.createWriteStream(fullZipPath)
+
+  try {
+    const readStream = s3.getObject({ Bucket: statsBucket, Key: `${statsFolder}/${currentSeason}/${zipFilename}` }).createReadStream()
+    await new Promise((resolve, reject) => {
+      readStream.on('error', (err) => reject(err))
+      writeStream.on('error', (err) => reject(err))
+      writeStream.on('finish', () => resolve())
+
+      readStream.pipe(writeStream)
+    })
+  } catch (e) {
+    if (e.code === 'NoSuchKey') {
+      // This is OK, we just haven't created the database yet.
+      console.log('No current database found in S3.')
+      return
+    }
+
+    throw e
+  } finally {
+    writeStream.close()
+  }
+
+  const zip = new AdmZip(fullZipPath)
+  await zip.extractAllTo(dbPath)
+  console.log('Downloaded current database from S3.')
+}
+
+const publishZipToS3 = async (s3, fullZipPath, currentZipFilename, dailyZipFilename, dbDirectory) => {
+  const zip = new AdmZip()
+  fs.writeFileSync(`${dbDirectory}/TIMESTAMP.TXT`, `Created from ${dailyZipFilename}.`)
+  zip.addLocalFolder(dbDirectory, '', /^(?!.*(lock))/)
+  zip.writeZip(fullZipPath)
+
+  const readStream = fs.createReadStream(fullZipPath)
+
+  await s3.upload({
+    Bucket: statsBucket,
+    Key: `${statsFolder}/${currentSeason}/${dailyZipFilename}`,
+    Body: readStream
+  }).promise()
+
+  console.log(`Uploaded database to S3 as ${dailyZipFilename}.`)
+
+  await s3.copyObject({
+    Bucket: statsBucket,
+    Key: `${statsFolder}/${currentSeason}/${currentZipFilename}`,
+    CopySource: `/${statsBucket}/${statsFolder}/${currentSeason}/${dailyZipFilename}`
+  }).promise()
+
+  console.log('Copied database to current.')
+}
+
+const scrubTempDirectory = async (tempDirectory) => {
+  async function * walkFiles (dir) {
+    for await (const d of await fs.promises.opendir(dir)) {
+      const entry = path.join(dir, d.name)
+      if (d.isDirectory()) yield * walkFiles(entry)
+      else if (d.isFile()) yield entry
+    }
+  }
+
+  // Calling cleanup() fails, not sure why.  This works though.
+  // We still end up with empty directories, for some reason
+  // we can't delete those.  We should clean up every so often,
+  // but at least we won't run the disk out of space.
+  for await (const filepath of walkFiles(tempDirectory)) {
+    try {
+      console.log(`Deleting file ${filepath}.`)
+      fs.unlinkSync(filepath)
+    } catch (e) {
+      console.log(`Unable to delete ${filepath}.`)
+    }
+  }
+}
+
 const run = async () => {
-  const processedMarkerFiles = []
+  const s3 = new AWS.S3()
+  const { path: tempDirectory } = await tmp.dir({ mode: 0o0700, prefix: 'ngs-stats', unsafeCleanup: true })
+  console.log(`Processing files using working directory ${tempDirectory}.`)
+  const currentZipFilename = `NGS-season${currentSeason}-current.zip`
+  const dailyZipFilename = `NGS-season${currentSeason}-${new Date().toISOString().replace(/-/g, '_').replace(/:/g, '_')}.zip`
+  const oldZipPath = `${tempDirectory}/stats-old.zip`
+  const newZipPath = `${tempDirectory}/stats-new.zip`
+  const replayDirectory = `${tempDirectory}/replays`
+  const dbPath = `${tempDirectory}/database`
+  fs.mkdirSync(dbPath)
+  fs.mkdirSync(replayDirectory)
+
+  await downloadAndExtractZipFromS3(s3, currentZipFilename, oldZipPath, dbPath)
   const db = openDatabase(dbPath)
   const { returnObject: matches } = await postFromNgs('schedule/fetch/reported/matches', { season: currentSeason })
+  console.log(`Found ${matches.length} matches.`)
   const { returnObject: teams } = await getFromNgs('team/get/registered')
+  console.log(`Found ${teams.length} teams.`)
 
   const collectionMap = await createCollections(db, teams)
   const teamMap = await createTeams(db, teams)
@@ -261,21 +402,17 @@ const run = async () => {
           continue
         }
 
-        const fullUrl = `https://s3.amazonaws.com/${ngsBucket}/${filename}`
-        const replayDirectory = `${replayCachePath}/${currentSeason}/${match.divisionConcat}`
-        fs.mkdirSync(replayDirectory, { recursive: true })
-        const localFile = `${replayDirectory}/${filename}`
-        const processedMarkerFile = `${localFile}.processed`
-
-        if (fs.existsSync(processedMarkerFile)) {
-          // We've already processed this replay completely, ignore it.
-          console.log(`Skipping ${localFile}, was already processed.`)
+        if (await alreadyProcessedReplay(db, filename)) {
+          console.log(`Skipping ${filename}.`)
           continue
         }
 
-        processedMarkerFiles.push(processedMarkerFile)
-        await downloadFile(fullUrl, localFile)
+        console.log(`Importing ${filename}.`)
+
+        const localFile = `${replayDirectory}/${filename}`
+        await downloadReplay(s3, replayBucket, filename, localFile)
         const { match: replay, players, status } = parser.processReplay(localFile, { overrideVerifiedBuild: true })
+        fs.unlinkSync(localFile)
         const bluePlayers = []
         const redPlayers = []
 
@@ -302,7 +439,7 @@ const run = async () => {
           for (const bluePlayer of bluePlayers) {
             if (!blueTeam.players.includes(bluePlayer)) {
               blueTeam.players.push(bluePlayer)
-              console.log(`Adding ORS ${bluePlayer} to ${blueTeam.name}`)
+              console.log(`Adding ORS ${bluePlayer} to ${blueTeam.name}.`)
             }
           }
         }
@@ -311,7 +448,7 @@ const run = async () => {
           for (const redPlayer of redPlayers) {
             if (!redTeam.players.includes(redPlayer)) {
               redTeam.players.push(redPlayer)
-              console.log(`Adding ORS ${redPlayer} to ${redTeam.name}`)
+              console.log(`Adding ORS ${redPlayer} to ${redTeam.name}.`)
             }
           }
         }
@@ -323,10 +460,9 @@ const run = async () => {
 
         if (status === 1) {
           const collectionIds = getCollectionIdsForDivision(collectionMap, match.divisionConcat)
-          const matchID = await insertReplay(db, replay, players, collectionIds)
+          const matchID = await insertReplay(db, replay, filename, players, collectionIds)
 
           if (matchID) {
-            console.log(`Imported ${localFile}.`)
             await updatePlayers(db, players)
           } else {
             console.log(`Skipped ${localFile}, status is ${status}.`)
@@ -364,11 +500,11 @@ const run = async () => {
     }
   }
 
-  // Now that we've processed all of these replays and updated the players mentnioned
-  // in them, mark them so we skip them on the next run.
-  for (const processedMarkerFile of processedMarkerFiles) {
-    fs.writeFileSync(processedMarkerFile, 'done')
-  }
+  await closeDatabase(db)
+
+  await publishZipToS3(s3, newZipPath, currentZipFilename, dailyZipFilename, dbPath)
+
+  await scrubTempDirectory(tempDirectory)
 }
 
 run().then(() => console.log('Complete.'))

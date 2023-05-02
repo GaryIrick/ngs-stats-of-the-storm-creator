@@ -1,7 +1,7 @@
 module.exports = {
   currentSeason: 15,
   ngsApiUrl: 'https://www.nexusgamingseries.org/api',
-  ngsBucket: 'ngs-replay-storage',
-  replayCachePath: 'T:\\Replays',
-  dbPath: 'T:\\sots'
+  replayBucket: 'ngs-replay-storage',
+  statsBucket: 'rackham-ngs-public',
+  statsFolder: 'ngs-stats-of-the-storm'
 }
