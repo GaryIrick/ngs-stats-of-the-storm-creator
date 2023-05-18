@@ -11,7 +11,7 @@ const LinvoDB = require('linvodb3')
 const postFromNgs = require('./postFromNgs')
 const getFromNgs = require('./getFromNgs')
 const { uniq, startCase } = require('lodash')
-const { currentSeason, replayBucket, statsBucket, statsFolder } = require('./config')
+const { replayBucket, statsBucket, statsFolder } = require('./config')
 
 // Make the AWS SDK stop whining about V2 going into maintenance mode soon.
 require('aws-sdk/lib/maintenance_mode_message').suppress = true
@@ -282,7 +282,7 @@ const getCollectionIdsForDivision = (collectionMap, divisionConcat) => {
   return collectionIds
 }
 
-const downloadAndExtractZipFromS3 = async (s3, zipFilename, fullZipPath, dbPath) => {
+const downloadAndExtractZipFromS3 = async (s3, zipFilename, fullZipPath, dbPath, currentSeason) => {
   const writeStream = fs.createWriteStream(fullZipPath)
 
   try {
@@ -306,12 +306,14 @@ const downloadAndExtractZipFromS3 = async (s3, zipFilename, fullZipPath, dbPath)
     writeStream.close()
   }
 
+  console.log('Downloaded current database from S3.')
+
   const zip = new AdmZip(fullZipPath)
   await zip.extractAllTo(dbPath)
-  console.log('Downloaded current database from S3.')
+  console.log('Unzipped database.')
 }
 
-const publishZipToS3 = async (s3, fullZipPath, currentZipFilename, dailyZipFilename, dbDirectory) => {
+const publishZipToS3 = async (s3, fullZipPath, currentZipFilename, dailyZipFilename, dbDirectory, currentSeason) => {
   const zip = new AdmZip()
   fs.writeFileSync(`${dbDirectory}/TIMESTAMP.TXT`, `Created from ${dailyZipFilename}.`)
   zip.addLocalFolder(dbDirectory, '', /^(?!.*(lock))/)
@@ -359,9 +361,11 @@ const scrubTempDirectory = async (tempDirectory) => {
   }
 }
 
-const run = async () => {
+module.exports = async () => {
   const s3 = new AWS.S3()
   const { path: tempDirectory } = await tmp.dir({ mode: 0o0700, prefix: 'ngs-stats', unsafeCleanup: true })
+  const { returnObject: { value: currentSeason } } = await getFromNgs('admin/getSeasonInfo')
+  console.log(`Current season is ${currentSeason}.`)
   console.log(`Processing files using working directory ${tempDirectory}.`)
   const currentZipFilename = `NGS-season${currentSeason}-current.zip`
   const dailyZipFilename = `NGS-season${currentSeason}-${new Date().toISOString().replace(/-/g, '_').replace(/:/g, '_')}.zip`
@@ -372,7 +376,7 @@ const run = async () => {
   fs.mkdirSync(dbPath)
   fs.mkdirSync(replayDirectory)
 
-  await downloadAndExtractZipFromS3(s3, currentZipFilename, oldZipPath, dbPath)
+  await downloadAndExtractZipFromS3(s3, currentZipFilename, oldZipPath, dbPath, currentSeason)
   const db = openDatabase(dbPath)
   const { returnObject: matches } = await postFromNgs('schedule/fetch/reported/matches', { season: currentSeason })
   console.log(`Found ${matches.length} matches.`)
@@ -413,6 +417,7 @@ const run = async () => {
           await downloadReplay(s3, replayBucket, filename, localFile)
         } catch (e) {
           console.log(`Unable to download ${filename} from S3, skipping.`)
+          console.log(`Error: ${e}`)
           continue
         }
 
@@ -507,9 +512,7 @@ const run = async () => {
 
   await closeDatabase(db)
 
-  await publishZipToS3(s3, newZipPath, currentZipFilename, dailyZipFilename, dbPath)
+  await publishZipToS3(s3, newZipPath, currentZipFilename, dailyZipFilename, dbPath, currentSeason)
 
   await scrubTempDirectory(tempDirectory)
 }
-
-run().then(() => console.log('Complete.'))
