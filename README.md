@@ -6,6 +6,8 @@ This repo will:
 - Create a Stats of the Storm database from those replays.
 - Zip up the database and upload it to S3.
 
+Learn more about Stats of the Storm [here](https://ebshimizu.github.io/stats-of-the-storm/).
+
 ## Setup
 
 You will need to update these values in config.js to match your S3 bucket:
